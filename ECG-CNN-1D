@@ -21,7 +21,7 @@ def cnn_model_fn(features, labels, mode, params):
 	
 	conv1 = tf.layers.conv1d(										
 		inputs=input_layer,
-		filters=80,						
+		filters=32,						
 		kernel_size=5,					
 		padding="same",
 		activation=tf.nn.leaky_relu,
@@ -43,7 +43,7 @@ def cnn_model_fn(features, labels, mode, params):
 	#Convolutional Layer # 2
 	conv2 = tf.layers.conv1d(
 		inputs=pool1,					
-		filters=160,
+		filters=64,
 		kernel_size=5,
 		padding="same",
 		activation=tf.nn.leaky_relu,
@@ -69,7 +69,7 @@ def cnn_model_fn(features, labels, mode, params):
 		inputs=pool2_flat,
 		units=128,
 		activation=tf.nn.relu,
-		name = "dense") #RELU NOT LEAKY!!!
+		name = "dense") 
 
 
 		
