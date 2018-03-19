@@ -1,0 +1,277 @@
+#!/usr/bin/env python3.5
+
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+import tensorflow as tf
+import numpy as np
+import time, os
+import matplotlib.pyplot as plt
+from tensorflow.python.tools import inspect_checkpoint as chkp
+from random import randint
+
+tf.logging.set_verbosity(tf.logging.INFO)
+
+def saveMaps(image_maps, gridSize, save_dir):
+    """
+    Plot labelled example data in a gridSize*gridSize grid.
+    If Axis is True return plot with labelled axes.
+    """
+    fig, ax = plt.subplots(gridSize, gridSize)
+    
+    plt.suptitle("Image Map Examples")
+    
+    k = 0
+    
+    for i in np.arange(0, gridSize,1):
+        for j in np.arange(0, gridSize,1):
+            
+            k = k + 1
+            ax[i,j].plot(image_maps[k])
+            ax[i,j].axis("off")
+    
+    plt.savefig(save_dir)
+
+def visualiseData(ecgData, gridSize, axis, save_dir):
+	"""
+	Plot labelled example data in a gridSize*gridSize grid.
+	If Axis is True return plot with labelled axes.
+	"""
+	fig, ax = plt.subplots(gridSize, gridSize)
+	
+	plt.suptitle("Labelled example data")
+	
+	r = randint(0,len(ecgData[0])-16)
+	
+	k = 0
+	
+	for i in np.arange(0,gridSize,1):
+		for j in np.arange(0,gridSize,1):
+			
+			k = k + 1
+			ax[i,j].plot(ecgData[r+k])
+			
+			if axis == False:
+			
+				ax[i,j].axis("off")
+			# ax[i,j].annotate(classData[r+k], xy=(0, 0), xycoords='axes points',\
+				#            size=10, ha='left', va='top')
+	
+	
+
+def cnn_model_fn(features, labels, mode, params):
+	#Model function for CNN.
+	
+
+	input_layer = tf.reshape(features["x"], [-1, 1000, 1], name = "Input_Layer") #needs reshaping with new data
+	
+	
+	#Convolutional Layer # 1
+
+	conv1 = tf.layers.conv1d(										
+		inputs=input_layer,
+		filters=80,						
+		kernel_size=5,					
+		padding="same",
+		activation=tf.nn.relu,
+		name = "conv1")   ####CHANGED TO RELU TO ALLOW COMPLETE SPARCITY
+			 
+		#Average activations of convolutional layer 1
+	
+	average_density_1 = tf.reduce_mean(tf.reduce_sum(tf.cast((conv1 > 0), tf.float32), axis=[1]), name = "average_density_1")
+	tf.summary.scalar('AvergageDensity1', average_density_1)
+	
+	#Dense Layer
+	pool2_flat = tf.reshape(pool2, [-1, 80 * int(conv1.shape[1])]) #needs reshaping with new data
+	
+	dense = tf.layers.dense(
+		inputs=pool2_flat,
+		units=2,
+		activation=tf.nn.relu,
+		name = "dense")
+	
+	
+	#Logits layer
+	logits = tf.layers.dense(
+		inputs=dense,
+		units=2,
+		name = "logits")
+		
+	
+	predictions = {
+		#Generate Predictions (for PREDICT and EVAL mode)
+		
+		"classes": tf.argmax(input=logits, axis=1),
+		
+		#Add 'softmax_tensor' to the  graph. It is used for the
+		#PREDICT by the 'logging_hook'
+		"probabilities": tf.nn.softmax(logits, name="softmax_tensor")
+	}
+	
+
+	with tf.variable_scope('Accuracy'):
+		labelsOH = tf.one_hot(labels, 2)
+		correct_prediction = tf.equal(tf.argmax(tf.nn.softmax(logits), 1), tf.argmax(labelsOH, 1))
+		accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+		
+		#log the accuracy
+		tf.summary.scalar('Accuracy', accuracy)
+
+	#Create a logging hook for training metrics
+
+
+	if mode == tf.estimator.ModeKeys.PREDICT:
+		return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions)
+	
+	
+	with tf.variable_scope('Loss_Layer'):	
+		loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits) \
+		+ params["sparcity_constraint"] * tf.reduce_sum(conv1)
+	
+	#Create a logging hook for training metrics
+
+	train_logging_hook = tf.train.SummarySaverHook(
+		save_steps = 50,
+		output_dir = params["dir"],
+		summary_op = tf.summary.merge_all())
+
+	#Configure the training Op (for TRAIN mode)
+	if mode == tf.estimator.ModeKeys.TRAIN:
+		
+		optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
+		train_op = optimizer.minimize(
+			loss=loss, 
+			global_step=tf.train.get_global_step())
+		return tf.estimator.EstimatorSpec(
+			mode=mode, 
+			loss=loss, 
+			train_op=train_op, 
+			training_hooks = [train_logging_hook]) #ADDED LOGGING HOOK
+	
+	# Add evaluation metric (for EVAL mode)
+	
+	eval_metric_ops = {
+		"accuracy": tf.metrics.accuracy(
+			labels=labels, predictions=predictions["classes"]), #Calculates how often the predictions matches the labels
+	}
+	
+
+	return tf.estimator.EstimatorSpec(
+		mode=mode, loss=loss, eval_metric_ops=eval_metric_ops)#, evaluation_hooks = [logging_hook]) #ADDED LOGGING HOOK
+
+def main(unused_argv):
+	
+	#File Directory
+	dir = os.path.dirname(os.path.realpath(__file__))
+
+	#File Name
+	filename = str(os.path.basename(os.path.realpath(__file__)))
+
+	#Load ecgData:
+	ecgData = np.load("./data/ecgData_std.npy")#ecgData
+	#unseenData = np.load("./data/unseenData_std.npy")#unseenData
+
+	#Load Class data
+	classData = np.load("./data/classData_std.npy")
+	#unseenClass = np.load("./data/unseenClass_std.npy")
+	
+	#load training data and eval data
+	eval_data = ecgData[:round(ecgData.shape[0]*0.2)].astype(np.float32)
+	train_data = ecgData[round(ecgData.shape[0]*0.2):].astype(np.float32)
+	eval_labels = classData[:round(ecgData.shape[0]*0.2)].astype(np.int32)
+	train_labels = classData[round(ecgData.shape[0]*0.2):].astype(np.int32)
+
+	
+
+	for sc in [0, 1e-5, 5e-5, 1e-4, 5e-4]: #####MAKE SURE YOU REINITIALISE FOR EACH RUN!! sc = sparcity constraint!
+		model_dir = dir +'/' + filename[:len(filename)-3] + '/Results/1D-' + str(int(time.time())) + '-sc_' + str(sc) 
+		
+		#Make the results directory
+
+		if not os.path.exists(model_dir):
+			os.makedirs(model_dir)
+		
+		#Hyperparameters to pass to the model
+
+		model_params = {"sparcity_constraint": sc,
+						"dir": model_dir}
+
+		#create the estimator
+	
+		#Turn this on when optimizing for GPU 
+		"""
+		config = tf.ConfigProto()
+		config.gpu_options.allow_growth = True #Allows the NN to grow the amount of GPU memory it uses
+		config.gpu_options.per_process_gpu_memory_fraction = 0.6 #Sets a max amount of GPU memory usage 
+																#as some is used for GUI etc  
+		ecg_classifier =  tf.estimator.Estimator(config=tf.contrib.learn.RunConfig(session_config=config),
+			model_fn=cnn_model_fn, model_dir="/tmp/ecg_convnet_model")
+		"""
+		#Use this when optmizing for CPU
+		
+		ecg_classifier = tf.estimator.Estimator(
+		model_fn=cnn_model_fn, model_dir= model_dir, params = model_params)
+
+		#Set up logging for predictions
+		tensors_to_log = {
+			"probabilities": "softmax_tensor",
+			}
+	
+		logging_hook = tf.train.LoggingTensorHook(
+			tensors=tensors_to_log, every_n_iter=50)
+	
+		#Train the Model
+		train_input_fn = tf.estimator.inputs.numpy_input_fn(
+			x={"x": train_data},
+			y=train_labels,
+			batch_size=100,
+			num_epochs=None,
+			shuffle=True)
+		
+		ecg_classifier.train(
+			input_fn=train_input_fn,
+			steps=20000,
+			hooks=[logging_hook])
+	
+		#Evaluate the model and print results
+		eval_input_fn = tf.estimator.inputs.numpy_input_fn(
+			x={"x": eval_data},
+			y= eval_labels,
+			num_epochs=1,
+			shuffle=False)
+		
+
+		eval_results = ecg_classifier.evaluate(input_fn=eval_input_fn)
+	
+		print(eval_results)
+		print()
+
+		##Save Estimator checkpoint of image maps to be reused
+		
+		with tf.train.Saver() as saver:
+
+			saver.Save(conv1)
+		
+		
+		##Save numpy array of image maps shape #(batch,# (length, channels)
+		
+		image_maps = estimator.get_variable_value('conv1/kernel')
+		
+		save_dir = dir + "/ECG-1D-imagemaps-sc-" + str(sc)
+		
+		if not os.path.exists(save_dir):
+			os.makedirs(save_dir)
+
+		np.save(save_dir, image_maps)
+		
+		saveMaps()
+		##Create plots of Image Maps
+
+		visualiseData(image_maps, 4)
+
+		print("Tensorboard logdir at: " + model_dir)
+
+
+
+if __name__ == "__main__":
+	tf.app.run()
