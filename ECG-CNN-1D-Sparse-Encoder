@@ -6,6 +6,9 @@ from __future__ import print_function
 import tensorflow as tf
 import numpy as np
 import time, os
+#import matplotlib.pyplot as plt
+#from tensorflow.python.tools import inspect_checkpoint as chkp
+#from random import randint
 
 tf.logging.set_verbosity(tf.logging.INFO)
 
@@ -22,7 +25,7 @@ def cnn_model_fn(features, labels, mode, params):
 	conv1 = tf.layers.conv1d(										
 		inputs=input_layer,
 		filters=80,						
-		kernel_size=5,					
+		kernel_size=params["kernel_size"],					
 		padding="same",
 		activation=tf.nn.relu, ####CHANGED TO RELU TO ALLOW COMPLETE SPARCITY
 		name = "conv1")   
@@ -136,70 +139,78 @@ def main(unused_argv):
 	train_labels = classData[round(ecgData.shape[0]*0.2):].astype(np.int32)
 
 	
+	for ker in [5, 15, 25, 35]: #Play about with kernal sizes to see effects on results
+		for sc in [0, 1e-5, 5e-5, 1e-4, 5e-4]: #Alter the sparcity constraints at different kernal sizes
+			#Start performance counter
+			start = time.perf_counter()
 
-	for sc in [0, 1e-5, 5e-5, 1e-4, 5e-4]:
-		model_dir = dir + '/Results/' + filename + '/sc-' + str(sc) + '/' 
-		
-		#Make the results directory
-		if not os.path.exists(model_dir):
-			os.makedirs(model_dir)
-		
-		#Hyperparameters to pass to the model
-		model_params = {"sparcity_constraint": sc,
-						"dir": model_dir}
+			model_dir = dir + '/Results/' + filename + '/ker-' + str(ker) + '/sc-' + str(sc) + '/' 
+			
+			#Make the results directory
+			if not os.path.exists(model_dir):
+				os.makedirs(model_dir)
+			
+			#Hyperparameters to pass to the model
+			model_params = {"sparcity_constraint": sc,
+							"dir": model_dir,
+							"kernel_size": ker}	
 
-		#create the estimator
-		ecg_classifier = tf.estimator.Estimator(
-		model_fn=cnn_model_fn, model_dir= model_dir, params = model_params)
+			#create the estimator
+			ecg_classifier = tf.estimator.Estimator(
+			model_fn=cnn_model_fn, model_dir= model_dir, params = model_params)
 
-		#Set up logging for predictions
-		tensors_to_log = {
-			"probabilities": "softmax_tensor",
-			}
+			#Set up logging for predictions
+			tensors_to_log = {
+				"probabilities": "softmax_tensor",
+				}
 	
-		logging_hook = tf.train.LoggingTensorHook(
-			tensors=tensors_to_log, every_n_iter=50)
+			logging_hook = tf.train.LoggingTensorHook(
+				tensors=tensors_to_log, every_n_iter=50)
 	
-		#Train the Model
-		train_input_fn = tf.estimator.inputs.numpy_input_fn(
-			x={"x": train_data},
-			y=train_labels,
-			batch_size=100,
-			num_epochs=None,
-			shuffle=True)
+			#Train the Model
+			train_input_fn = tf.estimator.inputs.numpy_input_fn(
+				x={"x": train_data},
+				y=train_labels,
+				batch_size=100,
+				num_epochs=None,
+				shuffle=True)
 		
-		ecg_classifier.train(
-			input_fn=train_input_fn,
-			steps=20000,
-			hooks=[logging_hook])
+			ecg_classifier.train(
+				input_fn=train_input_fn,
+				steps=20000,
+				hooks=[logging_hook])
 	
-		#Evaluate the model and print results
-		eval_input_fn = tf.estimator.inputs.numpy_input_fn(
-			x={"x": eval_data},
-			y= eval_labels,
-			num_epochs=1,
-			shuffle=False)
+			#Evaluate the model and print results
+			eval_input_fn = tf.estimator.inputs.numpy_input_fn(
+				x={"x": eval_data},
+				y= eval_labels,
+				num_epochs=1,
+				shuffle=False)
 		
 		
-		eval_results = ecg_classifier.evaluate(input_fn=eval_input_fn)
+			eval_results = ecg_classifier.evaluate(input_fn=eval_input_fn)
+			print(eval_results)
+			
+			#Finish performance counter
+			finish = time.perf_counter()
+			train_time = finish - start
+			print("Total traintime: %.3f seconds" % train_time)
 		
-		print(eval_results)
-		
-		save_dir = dir + "/Results/" + filename + '/'
+			save_dir = dir + "/Results/" + filename + '/ImageMaps/' + 'ker-' + str(ker) + '/'
 
-		if not os.path.exists(save_dir):
-			os.makedirs(save_dir)	
+			if not os.path.exists(save_dir):
+				os.makedirs(save_dir)	
 		
-		#Save accuracy and loss results in easily accessible file
-		with open(save_dir + 'results_summary.txt', a+) as f:
-			f.write('sc-'+ str(sc) + ': %s\r\n' % (str(eval_results)))
+			#Save accuracy and loss results in easily accessible file
+			with open( dir + '/Results/' + filename + 'results_summary.txt', 'a+') as f:
+				f.write('ker-' + str(ker) + '_sc-'+ str(sc) + ': %s +"- Total traintime: %.3f seconds"\r\n' % (str(eval_results), train_time))
 
 		#Save numpy array of image maps, shape:(batch, length, channels)
-		image_maps = ecg_classifier.get_variable_value('conv1/kernel')
-		np.save(save_dir +"ImageMaps/sc-" + str(sc), image_maps)
+			image_maps = ecg_classifier.get_variable_value('conv1/kernel')
+			np.save(save_dir + "sc-" + str(sc), image_maps)
 
 		#Make Tensorboard easy to access at end of run.
-		print("Tensorboard logdir at: " +  model_dir)
+			print("Tensorboard logdir at: " +  model_dir)
 
 
 
