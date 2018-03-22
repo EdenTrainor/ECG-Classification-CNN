@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.5
+#!/usr/bin/python3.5
 
 from __future__ import absolute_import
 from __future__ import division
@@ -6,58 +6,9 @@ from __future__ import print_function
 import tensorflow as tf
 import numpy as np
 import time, os
-import matplotlib.pyplot as plt
-from tensorflow.python.tools import inspect_checkpoint as chkp
-from random import randint
 
 tf.logging.set_verbosity(tf.logging.INFO)
 
-def saveMaps(image_maps, gridSize, save_dir):
-    """
-    Plot labelled example data in a gridSize*gridSize grid.
-    If Axis is True return plot with labelled axes.
-    """
-    fig, ax = plt.subplots(gridSize, gridSize)
-    
-    plt.suptitle("Image Map Examples")
-    
-    k = 0
-    
-    for i in np.arange(0, gridSize,1):
-        for j in np.arange(0, gridSize,1):
-            
-            k = k + 1
-            ax[i,j].plot(image_maps[k])
-            ax[i,j].axis("off")
-    
-    plt.savefig(save_dir)
-
-def visualiseData(ecgData, gridSize, axis, save_dir):
-	"""
-	Plot labelled example data in a gridSize*gridSize grid.
-	If Axis is True return plot with labelled axes.
-	"""
-	fig, ax = plt.subplots(gridSize, gridSize)
-	
-	plt.suptitle("Labelled example data")
-	
-	r = randint(0,len(ecgData[0])-16)
-	
-	k = 0
-	
-	for i in np.arange(0,gridSize,1):
-		for j in np.arange(0,gridSize,1):
-			
-			k = k + 1
-			ax[i,j].plot(ecgData[r+k])
-			
-			if axis == False:
-			
-				ax[i,j].axis("off")
-			# ax[i,j].annotate(classData[r+k], xy=(0, 0), xycoords='axes points',\
-				#            size=10, ha='left', va='top')
-	
-	
 
 def cnn_model_fn(features, labels, mode, params):
 	#Model function for CNN.
@@ -73,21 +24,24 @@ def cnn_model_fn(features, labels, mode, params):
 		filters=80,						
 		kernel_size=5,					
 		padding="same",
-		activation=tf.nn.relu,
-		name = "conv1")   ####CHANGED TO RELU TO ALLOW COMPLETE SPARCITY
+		activation=tf.nn.relu, ####CHANGED TO RELU TO ALLOW COMPLETE SPARCITY
+		name = "conv1")   
 			 
 		#Average activations of convolutional layer 1
 	
-	average_density_1 = tf.reduce_mean(tf.reduce_sum(tf.cast((conv1 > 0), tf.float32), axis=[1]), name = "average_density_1")
-	tf.summary.scalar('AvergageDensity1', average_density_1)
+	with tf.variable_scope('Activations'):
+		average_density_1 = tf.reduce_mean(tf.reduce_sum(tf.cast((conv1 > 0), tf.float32), axis=[1]), name = "average_density_1")
+		tf.summary.scalar('AvergageDensity1', average_density_1)
 	
+
+
 	#Dense Layer
-	pool2_flat = tf.reshape(pool2, [-1, 80 * int(conv1.shape[1])]) #needs reshaping with new data
+	conv1_flat = tf.reshape(conv1, [-1, 80 * int(conv1.shape[1])]) #needs reshaping with new data
 	
 	dense = tf.layers.dense(
-		inputs=pool2_flat,
+		inputs=conv1_flat,
 		units=2,
-		activation=tf.nn.relu,
+		activation=tf.nn.leaky_relu,
 		name = "dense")
 	
 	
@@ -115,7 +69,7 @@ def cnn_model_fn(features, labels, mode, params):
 		accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 		
 		#log the accuracy
-		tf.summary.scalar('Accuracy', accuracy)
+		tf.summary.scalar('training_accuracy', accuracy)
 
 	#Create a logging hook for training metrics
 
@@ -151,7 +105,7 @@ def cnn_model_fn(features, labels, mode, params):
 	# Add evaluation metric (for EVAL mode)
 	
 	eval_metric_ops = {
-		"accuracy": tf.metrics.accuracy(
+		"final_accuracy": tf.metrics.accuracy(
 			labels=labels, predictions=predictions["classes"]), #Calculates how often the predictions matches the labels
 	}
 	
@@ -165,7 +119,7 @@ def main(unused_argv):
 	dir = os.path.dirname(os.path.realpath(__file__))
 
 	#File Name
-	filename = str(os.path.basename(os.path.realpath(__file__)))
+	filename = str(os.path.basename(os.path.realpath(__file__))).split('.')[0]
 
 	#Load ecgData:
 	ecgData = np.load("./data/ecgData_std.npy")#ecgData
@@ -183,32 +137,18 @@ def main(unused_argv):
 
 	
 
-	for sc in [0, 1e-5, 5e-5, 1e-4, 5e-4]: #####MAKE SURE YOU REINITIALISE FOR EACH RUN!! sc = sparcity constraint!
-		model_dir = dir +'/' + filename[:len(filename)-3] + '/Results/1D-' + str(int(time.time())) + '-sc_' + str(sc) 
+	for sc in [0, 1e-5, 5e-5, 1e-4, 5e-4]:
+		model_dir = dir + '/Results/' + filename + '/sc-' + str(sc) + '/' 
 		
 		#Make the results directory
-
 		if not os.path.exists(model_dir):
 			os.makedirs(model_dir)
 		
 		#Hyperparameters to pass to the model
-
 		model_params = {"sparcity_constraint": sc,
 						"dir": model_dir}
 
 		#create the estimator
-	
-		#Turn this on when optimizing for GPU 
-		"""
-		config = tf.ConfigProto()
-		config.gpu_options.allow_growth = True #Allows the NN to grow the amount of GPU memory it uses
-		config.gpu_options.per_process_gpu_memory_fraction = 0.6 #Sets a max amount of GPU memory usage 
-																#as some is used for GUI etc  
-		ecg_classifier =  tf.estimator.Estimator(config=tf.contrib.learn.RunConfig(session_config=config),
-			model_fn=cnn_model_fn, model_dir="/tmp/ecg_convnet_model")
-		"""
-		#Use this when optmizing for CPU
-		
 		ecg_classifier = tf.estimator.Estimator(
 		model_fn=cnn_model_fn, model_dir= model_dir, params = model_params)
 
@@ -240,36 +180,26 @@ def main(unused_argv):
 			num_epochs=1,
 			shuffle=False)
 		
-
+		
 		eval_results = ecg_classifier.evaluate(input_fn=eval_input_fn)
-	
+		
 		print(eval_results)
-		print()
+		
+		save_dir = dir + "/Results/" + filename + '/'
 
-		##Save Estimator checkpoint of image maps to be reused
-		
-		with tf.train.Saver() as saver:
-
-			saver.Save(conv1)
-		
-		
-		##Save numpy array of image maps shape #(batch,# (length, channels)
-		
-		image_maps = estimator.get_variable_value('conv1/kernel')
-		
-		save_dir = dir + "/ECG-1D-imagemaps-sc-" + str(sc)
-		
 		if not os.path.exists(save_dir):
-			os.makedirs(save_dir)
-
-		np.save(save_dir, image_maps)
+			os.makedirs(save_dir)	
 		
-		saveMaps()
-		##Create plots of Image Maps
+		#Save accuracy and loss results in easily accessible file
+		with open(save_dir + 'results_summary.txt', a+) as f:
+			f.write('sc-'+ str(sc) + ': %s\r\n' % (str(eval_results)))
 
-		visualiseData(image_maps, 4)
+		#Save numpy array of image maps, shape:(batch, length, channels)
+		image_maps = ecg_classifier.get_variable_value('conv1/kernel')
+		np.save(save_dir +"ImageMaps/sc-" + str(sc), image_maps)
 
-		print("Tensorboard logdir at: " + model_dir)
+		#Make Tensorboard easy to access at end of run.
+		print("Tensorboard logdir at: " +  model_dir)
 
 
 
