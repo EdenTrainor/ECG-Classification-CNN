@@ -1,3 +1,6 @@
+#This code creates heat maps of the image maps found using the sparse encoders. 
+
+
 import tensorflow as tf
 import numpy as np
 import matplotlib.pyplot as plt
