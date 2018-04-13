@@ -1,0 +1,336 @@
+#!/usr/bin/python3.5
+
+#-------------- MODULE IMPORTS -----------------
+
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+import tensorflow as tf 
+import numpy as np
+import time, os
+import csv
+from decimal import Decimal
+import pandas as pd
+import six
+from sklearn.utils import shuffle as mutual_shuffle
+from sklearn.preprocessing import normalize
+import matplotlib.pyplot as plt
+from random import shuffle, randint
+
+tf.logging.set_verbosity(tf.logging.INFO)
+
+#----------- DEFINE CUSTOM FUNCTIONS ------------
+
+def result_rounder(result):
+        """
+        Rounds reults to 8 decimal places.
+        """
+        return float(Decimal("%.8f" % result))
+
+def import_pickle(file_location): 
+
+    # Import dataframe
+    path60  = file_location
+    df60 = pd.read_pickle(path60)
+
+    # Separate pandas dataframe into classification and data arrays
+    class_data = df60["Classification"].as_matrix()
+    coil_data = df60["Coil Data"].as_matrix()
+    
+    return class_data, coil_data
+
+def split_dataa(coil_data, class_data):
+    """
+    Split data into healthy and ill types.
+    """
+    ill_data = []
+    health_data = []
+    
+    for index, item in enumerate(class_data):
+        
+        if item == 1:
+            ill_data.append(coil_data[index])
+        
+        if item == 0:
+            health_data.append(coil_data[index])
+            
+    return ill_data, health_data
+
+
+def function_town(ill_array, health_array, shuffle):
+    """
+    Return the processed ecg_data and the class_data. Also return arrays of ill and healthy ppts.
+    If shuffle is true, shuffle data.
+    """
+    
+    print("ill samples", len(ill_array))
+    print("healthy samples", len(health_array))
+    
+    class_data = []
+    
+    for i in np.arange(0, len(ill_array), 1):
+        class_data.append(1)
+    
+    for i in np.arange(0, len(health_array), 1):
+        class_data.append(0)
+   
+    ecg_data = np.reshape(np.append(ill_array, health_array), (-1, 15, 2000))
+    
+    if shuffle == True:
+        class_data, ecg_data = mutual_shuffle(np.array(class_data), ecg_data, random_state=0)
+        
+    
+    return np.array(ecg_data), class_data
+
+
+def cnn_model_fn(features, labels, mode, params):
+    
+#----------- MODEL ARCHITECTURE -----------------
+
+    input_layer = tf.reshape(features["x"], [-1, 15, 2000, 1], name = "Input_Layer") #needs reshaping with new data
+    
+    
+    #Convolutional Layer # 1
+
+    conv1 = tf.layers.conv2d(                                       
+        inputs=input_layer,
+        filters=80,                     
+        kernel_size= [15, params["kernel_size"]],                   
+        padding="same",
+        activation=tf.nn.relu, ####CHANGED TO RELU TO ALLOW COMPLETE SPARSITY
+        name = "conv1")   
+             
+        #Average activations of convolutional layer 1
+    
+    with tf.variable_scope('Activations'):
+        average_density_1 = tf.reduce_mean(
+            input_tensor = tf.reduce_sum(tf.cast((conv1 > 0), tf.float32),
+            axis=[1, 2, 3]), #[batch, length, kernels]?
+            name = "average_density_1")
+        
+        tf.summary.scalar('AvergageDensity1', average_density_1)
+    
+
+
+    #Dense Layer
+    conv1_flat = tf.reshape(conv1, [-1, 80 * int(conv1.shape[1]) * int(conv1.shape[2])]) #needs reshaping with new data
+    
+    dense = tf.layers.dense(
+        inputs=conv1_flat,
+        units=2,
+        activation=tf.nn.leaky_relu,
+        name = "dense")
+    
+    
+    #Logits layer
+    logits = tf.layers.dense(
+        inputs=dense,
+        units=2,
+        name = "logits")
+        
+#--------------- MODEL OUTPUT STRUCTURES ----------------
+    
+    predictions = {
+        #Generate Predictions (for PREDICT and EVAL mode)
+        
+        "classes": tf.argmax(input=logits, axis=1),
+        
+        #Add 'softmax_tensor' to the  graph. It is used for the
+        #PREDICT by the 'logging_hook'
+        "probabilities": tf.nn.softmax(logits, name="softmax_tensor")
+    }
+    
+
+    with tf.variable_scope('Accuracy'):
+        labelsOH = tf.one_hot(labels, 2)
+        correct_prediction = tf.equal(tf.argmax(tf.nn.softmax(logits), 1), tf.argmax(labelsOH, 1))
+        accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+        
+        #log the accuracy
+        tf.summary.scalar('training_accuracy', accuracy)
+
+    #Create a logging hook for training metrics
+
+
+    if mode == tf.estimator.ModeKeys.PREDICT:
+        return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions)
+    
+    
+    with tf.variable_scope('Loss_Layer'):   
+        loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits) \
+        + params["sparsity_constraint"] * tf.reduce_sum(conv1)
+    
+    #Create a logging hook for training metrics
+
+    train_logging_hook = tf.train.SummarySaverHook(
+        save_steps = 50,
+        output_dir = params["dir"],
+        summary_op = tf.summary.merge_all())
+
+    #Configure the training Op (for TRAIN mode)
+    if mode == tf.estimator.ModeKeys.TRAIN:
+        
+        optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
+        train_op = optimizer.minimize(
+            loss=loss, 
+            global_step=tf.train.get_global_step())
+        return tf.estimator.EstimatorSpec(
+            mode=mode, 
+            loss=loss, 
+            train_op=train_op, 
+            training_hooks = [train_logging_hook])
+    
+    # Add evaluation metric (for EVAL mode)
+    
+    eval_metric_ops = {
+        "final_accuracy": tf.metrics.accuracy(
+            labels=labels, predictions=predictions["classes"]), #Calculates how often the predictions matches the labels
+    }
+    
+
+    return tf.estimator.EstimatorSpec(
+        mode=mode, loss=loss, eval_metric_ops=eval_metric_ops)#, evaluation_hooks = [logging_hook]) #ADDED LOGGING HOOK
+
+def main(unused_argv):
+    
+#------------------ DATA IMPORT --------------------
+
+    #File Directory
+    dir = os.path.dirname(os.path.realpath(__file__))
+
+    #File Name
+    filename = str(os.path.basename(os.path.realpath(__file__))).split('.')[0]
+
+    #Import data from pandas dataframe
+    class_data, coil_data = import_pickle("./inData/6060DataFrame.pkl")
+
+    # Normalise coil_data
+    for index, item in enumerate(coil_data):
+        
+        coil_data[index] = normalize(item, axis=1)
+
+    #Split data into healthy and Ill so that equal amounts of both can be saved for evaluation
+    ill_data, health_data = split_dataa(coil_data, class_data)
+
+    ill_unseen = np.array(ill_data[:20])
+    health_unseen = np.array(health_data[:20])
+    ill_data = np.array(ill_data[20:])
+    health_data = np.array(health_data[20:])
+
+    ecg_data, class_data = function_town(ill_data, health_data, True)
+    unseen_data, unseenClass = function_town(ill_unseen, health_unseen, True)
+
+    #Reshape data to fit into tensorflow placeholder
+    ecg_data = np.reshape(ecg_data, (-1,15,2000,1))
+    unseen_data = np.reshape(unseen_data, (-1,15,2000,1))
+
+        #load training data and eval data
+    eval_data = unseen_data.astype(np.float32)  #keep amounts of data the same
+    train_data = ecg_data.astype(np.float32)
+    eval_labels = unseenClass.astype(np.int32)
+    train_labels = class_data.astype(np.int32)
+
+    results_dir =  dir + '/Results/' + filename + '/'
+    
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
+    
+    with open(dir + '/Results/' + filename + '/results_summary-ECG-2D.csv', 'a+') as csvfile:
+        w = csv.writer(csvfile)
+        top_row = np.asarray(['Kernal Size', 'Sparcity Constraint', 'Accuracy', 'Loss', 'Training Time'])
+        w.writerow(top_row)
+
+#--------- NEURAL NETWORK OPERATIONS -------------------
+
+    for ker in [10]: 
+        for sc in np.arange(0, 1.1e-4, 1e-5): 
+            #Start performance counter
+            start = time.perf_counter()
+
+            #Model directory holds the checkpoint files and meta-graph for the network 
+            model_dir = dir + '/Results/' + filename + '/ker-' + str(ker) + '/sc-' + str(sc) + '/'
+            
+            #Make the results directory
+            if not os.path.exists(model_dir):
+                os.makedirs(model_dir)
+            
+            #Hyperparameters to pass to the model
+            model_params = {"sparsity_constraint": sc,
+                            "dir": model_dir,
+                            "kernel_size": ker} 
+
+            #create the estimator
+            ecg_classifier = tf.estimator.Estimator(
+            model_fn=cnn_model_fn, model_dir= model_dir, params = model_params)
+
+            #Set up logging for predictions
+            tensors_to_log = {
+                "probabilities": "softmax_tensor",
+                }
+    
+            logging_hook = tf.train.LoggingTensorHook(
+                tensors=tensors_to_log, every_n_iter=50)
+    
+            #Train the Model
+            train_input_fn = tf.estimator.inputs.numpy_input_fn(
+                x={"x": train_data},
+                y=train_labels,
+                batch_size=10,
+                num_epochs=None,
+                shuffle=True)
+        
+            ecg_classifier.train(
+                input_fn=train_input_fn,
+                steps=20000,
+                hooks=[logging_hook])
+    
+            #Evaluate the model and print results
+            eval_input_fn = tf.estimator.inputs.numpy_input_fn(
+                x={"x": eval_data},
+                y= eval_labels,
+                num_epochs=1,
+                shuffle=False)
+        
+#------------- RESULTS OUTPUTTING ----------------
+
+            eval_results = ecg_classifier.evaluate(input_fn=eval_input_fn)
+            print(eval_results)
+            
+            #Finish performance counter
+            finish = time.perf_counter()
+            train_time = finish - start
+            print("Total traintime: %.3f seconds" % train_time)
+        
+            #Save numpy array of image maps, shape:(batch, length, channels)
+            save_dir = dir + "/Results/" + filename + '/ImageMaps/' + 'ker-' + str(ker) + '/'
+
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)   
+
+            #save image maps in a numpy array
+            image_maps = ecg_classifier.get_variable_value('conv1/kernel')
+            np.save(save_dir + "sc-" + str(sc), image_maps)
+
+            #append results to a file
+            results_summary = [result_rounder(ker),
+                result_rounder(sc),
+                result_rounder(eval_results["final_accuracy"]),
+                result_rounder(eval_results["loss"]),            
+                result_rounder(train_time)]
+
+            with open(dir + '/Results/' + filename + '/results_summary-ECG-2D.csv', 'a') as csvfile:
+                results_writer = csv.writer(csvfile)
+                results_writer.writerow(results_summary)
+
+            #Make Tensorboard easy to access at end of run.
+            print("Tensorboard logdir at: " +  model_dir)
+
+    print('Results:')
+
+    with open(dir + '/Results/' + filename + '/results_summary-ECG-2D.csv', 'r') as csvfile:
+        results_reader = csv.reader(csvfile)
+        for row in results_reader:
+            print(row)
+
+if __name__ == "__main__":
+    tf.app.run()
